@@ -10,11 +10,17 @@ import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.IntStream;
 
+import bftsmart.consensus.Consensus;
+import bftsmart.consensus.Epoch;
 import bftsmart.consensus.messages.ConsensusMessage;
+import bftsmart.consensus.messages.MessageFactory;
 import bftsmart.reconfiguration.views.View;
 import bftsmart.statemanagement.ApplicationState;
 import bftsmart.statemanagement.SMMessage;
 import bftsmart.statemanagement.StateManager;
+import bftsmart.tom.core.DeliveryThread;
+import bftsmart.tom.core.TOMLayer;
+import bftsmart.tom.leaderchange.CertifiedDecision;
 import bftsmart.tom.util.TOMUtil;
 
 public class CollaborativeStateManager extends StateManager {
@@ -77,7 +83,7 @@ public class CollaborativeStateManager extends StateManager {
             int[] parts = IntStream.range(0, allProcesses.length).filter(n -> n != cmsg.getSender()).toArray();
 
             // Generate that part
-            ApplicationState thisState = dt.getRecoverer().getState(cmsg.getCID(), false); // no use for sendState
+            CollaborativeState thisState = (CollaborativeState) dt.getRecoverer().getState(cmsg.getCID(), false);
             byte[] serializedState = thisState.getSerializedState();
             // Just for safety
             byte[] partOfState = new byte[serializedState.length];
@@ -96,6 +102,7 @@ public class CollaborativeStateManager extends StateManager {
                 }
             }
 
+            // Copy the part of state
             for (int i = 0; i < partOfState.length; i++) {
                 partOfState[i] = serializedState[init + i];
             }
@@ -103,7 +110,8 @@ public class CollaborativeStateManager extends StateManager {
             // Send state back
             int[] targets = { cmsg.getSender() };
 
-            // SET PART OF STATE - PROBABLY SHOULD SEPARATE THIS
+            // Should create new instance to make it more semantic?
+            // Probably yes...
             thisState.setSerializedState(partOfState);
 
             CollaborativeSMMessage rmsg = new CollaborativeSMMessage(myId, msg.getCID(), TOMUtil.SM_REPLY, thisState,
@@ -127,28 +135,25 @@ public class CollaborativeStateManager extends StateManager {
                 int currentRegency = -1;
                 int currentLeader = -1;
                 View currentView = null;
+                CertifiedDecision currentProof = null;
 
                 if (!appStateOnly) {
-                    senderRegencies.put(reply.getSender(), reply.getRegency());
-                    senderLeaders.put(reply.getSender(), reply.getLeader());
-                    senderViews.put(reply.getSender(), reply.getView());
-                    // senderProofs.put(msg.getSender(),
-                    // msg.getState().getCertifiedDecision(SVController));
-                    if (enoughRegencies(reply.getRegency())) {
-                        currentRegency = reply.getRegency();
+                    senderRegencies.put(msg.getSender(), msg.getRegency());
+                    senderLeaders.put(msg.getSender(), msg.getLeader());
+                    senderViews.put(msg.getSender(), msg.getView());
+                    senderProofs.put(msg.getSender(), msg.getState().getCertifiedDecision(SVController));
+                    if (enoughRegencies(msg.getRegency())) {
+                        currentRegency = msg.getRegency();
                     }
-                    if (enoughLeaders(reply.getLeader())) {
-                        currentLeader = reply.getLeader();
+                    if (enoughLeaders(msg.getLeader())) {
+                        currentLeader = msg.getLeader();
                     }
-                    if (enoughViews(reply.getView())) {
-                        currentView = reply.getView();
-                        if (!currentView.isMember(SVController.getStaticConf()
-                                .getProcessId())) {
-                            logger.warn("Not a member!");
-                        }
+                    if (enoughViews(msg.getView())) {
+                        currentView = msg.getView();
                     }
-                    // if (enoughProofs(waitingCID, this.tomLayer.getSynchronizer().getLCManager()))
-                    // currentProof = msg.getState().getCertifiedDecision(SVController);
+                    if (enoughProofs(waitingCID, this.tomLayer.getSynchronizer().getLCManager())) {
+                        currentProof = msg.getState().getCertifiedDecision(SVController);
+                    }
 
                 } else {
                     currentLeader = tomLayer.execManager.getCurrentLeader();
@@ -156,8 +161,13 @@ public class CollaborativeStateManager extends StateManager {
                     currentView = SVController.getCurrentView();
                 }
 
-                senderStates.put(reply.getSender(), reply.getState());
+                ApplicationState replyState = reply.getState();
+                if (replyState instanceof CollaborativeState) {
+                    senderStates.put(reply.getSender(), reply.getState());
+                }
 
+                // Only when number of replies is good....
+                // Check # of correct processes and use that...
                 if (senderStates.size() == SVController.getStaticConf().getN()) {
                     // Sort parts
                     TreeMap<Integer, ApplicationState> sorted = new TreeMap<>(senderStates);
@@ -176,48 +186,88 @@ public class CollaborativeStateManager extends StateManager {
                         lastPart += partState.length;
                     }
 
-                    // HAVE TO CREATE NEW STATE AND STOP DEPENDING ON APPLICATIONSTATE
-                    ApplicationState oneState = parts[0];
-                    oneState.setSerializedState(fullState);
+                    CollaborativeState tempState = (CollaborativeState) reply.getState();
+
+                    // HAVE TO REVIEW THIS PARAMETERS
+                    CollaborativeState newState = new CollaborativeState(fullState, reply.getCID(),
+                            tempState.getMessageBatches(), tempState.getLastCheckpointCID(),
+                            SVController.getStaticConf().getProcessId());
 
                     // Set state locally
-                    state = oneState;
+                    state = newState;
                     if (stateTimer != null)
                         stateTimer.cancel();
 
-                    // BOILERPLATE TO KEEP BFT RUNNING ?
-                    if (currentRegency > -1 && currentLeader > -1
-                            && currentView != null
-                            && (!isBFT || appStateOnly)) {
-                        logger.info("---- RECEIVED VALID STATE ----");
-
-                        logger.debug("The state of those replies is good!");
-                        logger.debug("CID State requested: " + reply.getCID());
+                    if (currentRegency > -1 && currentLeader > -1 && currentView != null
+                            && (!isBFT || currentProof != null || appStateOnly)) {
+                        logger.info("Received state. Will install it");
 
                         tomLayer.getSynchronizer().getLCManager().setLastReg(currentRegency);
                         tomLayer.getSynchronizer().getLCManager().setNextReg(currentRegency);
                         tomLayer.getSynchronizer().getLCManager().setNewLeader(currentLeader);
-
                         tomLayer.execManager.setNewLeader(currentLeader);
 
+                        if (currentProof != null && !appStateOnly) {
+
+                            logger.debug("Installing proof for consensus " + waitingCID);
+
+                            Consensus cons = execManager.getConsensus(waitingCID);
+                            Epoch e = null;
+
+                            for (ConsensusMessage cm : currentProof.getConsMessages()) {
+
+                                e = cons.getEpoch(cm.getEpoch(), true, SVController);
+                                if (e.getTimestamp() != cm.getEpoch()) {
+
+                                    logger.warn("Strange... proof contains messages from more than just one epoch");
+                                    e = cons.getEpoch(cm.getEpoch(), true, SVController);
+                                }
+                                e.addToProof(cm);
+
+                                if (cm.getType() == MessageFactory.ACCEPT) {
+                                    e.setAccept(cm.getSender(), cm.getValue());
+                                } else if (cm.getType() == MessageFactory.WRITE) {
+                                    e.setWrite(cm.getSender(), cm.getValue());
+                                }
+
+                            }
+
+                            if (e != null) {
+
+                                byte[] hash = tomLayer.computeHash(currentProof.getDecision());
+                                e.propValueHash = hash;
+                                e.propValue = currentProof.getDecision();
+                                e.deserializedPropValue = tomLayer.checkProposedValue(currentProof.getDecision(),
+                                        false);
+                                cons.decided(e, false);
+
+                                logger.info("Successfully installed proof for consensus " + waitingCID);
+
+                            } else {
+                                logger.error("Failed to install proof for consensus " + waitingCID);
+
+                            }
+
+                        }
+
+                        // I might have timed out before invoking the state transfer, so
+                        // stop my re-transmission of STOP messages for all regencies up to the current
+                        // one
                         if (currentRegency > 0) {
                             tomLayer.getSynchronizer().removeSTOPretransmissions(currentRegency - 1);
                         }
+                        // if (currentRegency > 0)
+                        // tomLayer.requestsTimer.setTimeout(tomLayer.requestsTimer.getTimeout() *
+                        // (currentRegency * 2));
 
-                        logger.debug("trying to acquire deliverlock");
                         dt.pauseDecisionDelivery();
-                        logger.debug("acquired");
-
-                        // this makes the isRetrievingState() evaluates to false
                         waitingCID = -1;
-                        dt.update(state); // CALLS SET STATE PROPERLY
+                        dt.update(state);
 
-                        // Deal with stopped messages that may come from
-                        // synchronization phase
                         if (!appStateOnly && execManager.stopped()) {
                             Queue<ConsensusMessage> stoppedMsgs = execManager.getStoppedMsgs();
                             for (ConsensusMessage stopped : stoppedMsgs) {
-                                if (stopped.getNumber() > state.getLastCID()) {
+                                if (stopped.getNumber() > state.getLastCID() /* msg.getCID() */) {
                                     execManager.addOutOfContextMessage(stopped);
                                 }
                             }
@@ -225,7 +275,6 @@ public class CollaborativeStateManager extends StateManager {
                             execManager.restart();
                         }
 
-                        logger.info("Processing out of context messages");
                         tomLayer.processOutOfContext();
 
                         if (SVController.getCurrentViewId() != currentView.getId()) {
@@ -252,8 +301,37 @@ public class CollaborativeStateManager extends StateManager {
                             appStateOnly = false;
                             tomLayer.getSynchronizer().resumeLC();
                         }
+                    } else if ((SVController.getCurrentViewN() / 2) < getReplies()) {
+                        waitingCID = -1;
+                        reset();
+
+                        if (stateTimer != null) {
+                            stateTimer.cancel();
+                        }
+
+                        if (appStateOnly) {
+                            requestState();
+                        }
+                    } else if (state == null) {
+                        logger.debug(
+                                "The replica from which I expected the state, sent one which doesn't match the hash of the others, or it never sent it at all");
+
+                        reset();
+                        requestState();
+
+                        if (stateTimer != null) {
+                            stateTimer.cancel();
+                        }
+                    } else if ((SVController.getCurrentViewN() - SVController.getCurrentViewF()) <= getReplies()) {
+
+                        logger.debug("Could not obtain the state, retrying");
+                        reset();
+                        if (stateTimer != null) {
+                            stateTimer.cancel();
+                        }
+                        waitingCID = -1;
                     } else {
-                        logger.info("Still receiving state...");
+                        logger.debug("State transfer not yet finished");
                     }
                 }
             }
@@ -262,7 +340,6 @@ public class CollaborativeStateManager extends StateManager {
     }
 
     private int[] getStateSize(int parts, int stateSize) {
-
         int localRange = (stateSize - 1) / parts + 1;
         int spare = localRange * parts - stateSize;
         int currentIndex = 0;
@@ -276,7 +353,6 @@ public class CollaborativeStateManager extends StateManager {
         }
 
         return tasksSize;
-
     }
 
 }
