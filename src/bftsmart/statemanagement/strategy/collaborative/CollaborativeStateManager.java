@@ -135,6 +135,7 @@ public class CollaborativeStateManager extends BaseStateManager {
                 if (serializedState == null) { // This shouldn't be null!!
                     thisState = dt.getRecoverer().getState(-1, sendState);
                 } else {
+                    logger.info("Total state size: " + serializedState + " bytes");
                     // Just for safety
                     byte[] partOfState = new byte[serializedState.length];
 
@@ -159,7 +160,7 @@ public class CollaborativeStateManager extends BaseStateManager {
                     // Should create new instance to make it more semantic?
                     // Probably yes...ß
                     thisState.setSerializedState(partOfState);
-                    logger.info("Sending state from " + myId + " back with " + partOfState.length
+                    logger.info("Sending state from replica " + myId + " back with " + partOfState.length
                             + " bytes long");
                 }
             }
@@ -205,14 +206,16 @@ public class CollaborativeStateManager extends BaseStateManager {
                     currentView = SVController.getCurrentView();
                 }
 
+                logger.info("Replica " + SVController.getStaticConf().getProcessId() + " received part of state from " + msg.getSender());
                 ApplicationState replyState = msg.getState();
                 senderStates.put(msg.getSender(), msg.getState());
 
                 // Only when number of replies is good....
                 // Check # of correct processes and use that...
-                if (senderStates.size() == SVController.getQuorum()) {
+                logger.info("Size: " + senderStates.size() + " OtherAcceptors: " + SVController.getCurrentViewOtherAcceptors().length);
+                if (senderStates.size() == SVController.getCurrentViewOtherAcceptors().length) {
                     // Sort parts
-                    logger.info("Started sorting parts");
+                    logger.info("Sorting parts");
                     TreeMap<Integer, ApplicationState> sorted = new TreeMap<>(senderStates);
                     ApplicationState[] parts = (ApplicationState[]) sorted.values().toArray(new ApplicationState[sorted.size()]);
 
