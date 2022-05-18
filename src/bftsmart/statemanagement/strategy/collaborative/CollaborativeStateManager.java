@@ -132,37 +132,32 @@ public class CollaborativeStateManager extends BaseStateManager {
                 thisState = dt.getRecoverer().getState(-1, sendState);
             } else {
                 byte[] serializedState = thisState.getSerializedState();
-                if (serializedState == null) { // This shouldn't be null!!
-                    thisState = dt.getRecoverer().getState(-1, sendState);
-                } else {
-                    logger.info("Total state size: " + serializedState + " bytes");
-                    // Just for safety
-                    byte[] partOfState = new byte[serializedState.length];
+                
+                logger.info("Total state size: " + serializedState.length + " bytes");
+                // Just for safety
+                byte[] partOfState = new byte[serializedState.length];
 
-                    // Split as evenly as possible
-                    int[] stateSize = getStateSize(parts.length, serializedState.length);
+                // Split as evenly as possible
+                int[] stateSize = getStateSize(parts.length, serializedState.length);
 
-                    int init = 0;
-                    for (int i = 0; i < parts.length; i++) {
-                        if (parts[i] == myId) {
-                            partOfState = new byte[stateSize[i]];
-                            break;
-                        } else {
-                            init += stateSize[i];
-                        }
+                int init = 0;
+                for (int i = 0; i < parts.length; i++) {
+                    if (parts[i] == myId) {
+                        partOfState = new byte[stateSize[i]];
+                        break;
+                    } else {
+                        init += stateSize[i];
                     }
-
-                    // Copy the part of state
-                    for (int i = 0; i < partOfState.length; i++) {
-                        partOfState[i] = serializedState[init + i];
-                    }
-
-                    // Should create new instance to make it more semantic?
-                    // Probably yes...ß
-                    thisState.setSerializedState(partOfState);
-                    logger.info("Sending state from replica " + myId + " back with " + partOfState.length
-                            + " bytes long");
                 }
+
+                // Copy the part of state
+                for (int i = 0; i < partOfState.length; i++) {
+                    partOfState[i] = serializedState[init + i];
+                }
+
+                thisState.setSerializedState(partOfState);
+                logger.info("Sending state from replica " + myId + " back with " + partOfState.length
+                        + " bytes long");
             }
 
             int[] targets = { msg.getSender() };
@@ -221,14 +216,9 @@ public class CollaborativeStateManager extends BaseStateManager {
 
                     logger.info("Calculating full size of state");
                     int fullSize = 0;
-                    for (ApplicationState part : parts) {
-                        byte[] serializedState = part.getSerializedState();
-                        if (serializedState == null) {
-                            logger.info("Serialized state is null");
-                            continue;    
-                        }
+                    for (ApplicationState part : parts) 
                         fullSize += part.getSerializedState().length;
-                    }
+                    
 
                     byte[] fullState = new byte[fullSize];
 
@@ -236,10 +226,6 @@ public class CollaborativeStateManager extends BaseStateManager {
                     int lastPart = 0;
                     for (ApplicationState part : parts) {
                         byte[] partState = part.getSerializedState();
-                        if (partState == null) {
-                            logger.info("Serialized state is null");
-                            continue;
-                        }
                         System.arraycopy(partState, 0, fullState, lastPart, partState.length);
                         lastPart += partState.length;
                     }
