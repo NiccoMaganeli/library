@@ -132,32 +132,35 @@ public class CollaborativeStateManager extends BaseStateManager {
                 thisState = dt.getRecoverer().getState(-1, sendState);
             } else {
                 byte[] serializedState = thisState.getSerializedState();
-                
-                logger.info("Total state size: " + serializedState.length + " bytes");
-                // Just for safety
-                byte[] partOfState = new byte[serializedState.length];
-
-                // Split as evenly as possible
-                int[] stateSize = getStateSize(parts.length, serializedState.length);
-
-                int init = 0;
-                for (int i = 0; i < parts.length; i++) {
-                    if (parts[i] == myId) {
-                        partOfState = new byte[stateSize[i]];
-                        break;
-                    } else {
-                        init += stateSize[i];
+                if (serializedState == null) {
+                    logger.info("Serialized state is null");
+                } else {
+                    logger.info("Total state size: " + serializedState.length + " bytes");
+                    // Just for safety
+                    byte[] partOfState = new byte[serializedState.length];
+    
+                    // Split as evenly as possible
+                    int[] stateSize = getStateSize(parts.length, serializedState.length);
+    
+                    int init = 0;
+                    for (int i = 0; i < parts.length; i++) {
+                        if (parts[i] == myId) {
+                            partOfState = new byte[stateSize[i]];
+                            break;
+                        } else {
+                            init += stateSize[i];
+                        }
                     }
+    
+                    // Copy the part of state
+                    for (int i = 0; i < partOfState.length; i++) {
+                        partOfState[i] = serializedState[init + i];
+                    }
+    
+                    thisState.setSerializedState(partOfState);
+                    logger.info("Sending state from replica " + myId + " back with " + partOfState.length
+                            + " bytes long");
                 }
-
-                // Copy the part of state
-                for (int i = 0; i < partOfState.length; i++) {
-                    partOfState[i] = serializedState[init + i];
-                }
-
-                thisState.setSerializedState(partOfState);
-                logger.info("Sending state from replica " + myId + " back with " + partOfState.length
-                        + " bytes long");
             }
 
             int[] targets = { msg.getSender() };
@@ -202,13 +205,18 @@ public class CollaborativeStateManager extends BaseStateManager {
                 }
 
                 logger.info("Replica " + SVController.getStaticConf().getProcessId() + " received part of state from " + msg.getSender());
+                logger.info("Part size: " + msg.getState().getSerializedState().length);
                 ApplicationState replyState = msg.getState();
                 senderStates.put(msg.getSender(), msg.getState());
 
                 // Only when number of replies is good....
                 // Check # of correct processes and use that...
-                logger.info("Size: " + senderStates.size() + " OtherAcceptors: " + SVController.getCurrentViewOtherAcceptors().length);
-                if (senderStates.size() == SVController.getCurrentViewOtherAcceptors().length) {
+
+                // We have all states with information?
+                boolean allSerializedIsValid = senderStates.values().stream().allMatch(state -> state.getSerializedState() != null);
+                boolean numberOfRepliesMatchView = senderStates.size() == SVController.getCurrentViewOtherAcceptors().length;
+
+                if (numberOfRepliesMatchView && allSerializedIsValid) {
                     // Sort parts
                     logger.info("Sorting parts");
                     TreeMap<Integer, ApplicationState> sorted = new TreeMap<>(senderStates);
@@ -348,7 +356,11 @@ public class CollaborativeStateManager extends BaseStateManager {
                             appStateOnly = false;
                             tomLayer.getSynchronizer().resumeLC();
                         }
-                    } else if ((SVController.getCurrentViewN() / 2) < getReplies()) {
+                    } else if (numberOfRepliesMatchView && !allSerializedIsValid){
+                        logger.info("Already have all replies, but some are missing. Requesting again");
+                        reset();
+                        requestState();
+                    } else if (!allSerializedIsValid && (SVController.getCurrentViewN() / 2) < getReplies()) {
                         waitingCID = -1;
                         reset();
 
@@ -365,7 +377,7 @@ public class CollaborativeStateManager extends BaseStateManager {
                         if (stateTimer != null)
                             stateTimer.cancel();
                         waitingCID = -1;
-                        // requestState();
+                        //requestState();
                     } else {
                         logger.debug("State transfer not yet finished");
 
